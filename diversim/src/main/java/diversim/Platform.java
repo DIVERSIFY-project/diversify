@@ -2,7 +2,13 @@ package diversim;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.HashSet;
 
+import diversim.strategy.extinction.AppExtinctionStrategy;
+import diversim.strategy.extinction.PlatformExtinctionStrategy;
+import diversim.strategy.reproduction.PlatformReproductionStrategy;
+import ec.util.MersenneTwisterFast;
 import sim.engine.SimState;
 import sim.util.Bag;
 import sim.field.network.*;
@@ -15,127 +21,119 @@ import sim.field.network.*;
  * which should be updated accordingly.
  *
  * @author Marco Biazzini
+ * @author Vivek Nallur
+ * 
+ * Platforms reproduce or kill themselves in the same way as Apps, controlled
+ * by the corresponding strategies stored in {@ #reproducers} and {@ #killers},
+ * respectively.
  *
  */
 public class Platform extends Entity {
 
+	// how many apps can one service on this platform  support.
+	private int APP_PER_SERVICE = 1; 
+	
+	public boolean dead = false;
+	
+	public List<App> app = new ArrayList<App>();
+	
+	List<PlatformReproductionStrategy> reproducers;
+	List<PlatformExtinctionStrategy> killers;
+	// ArrayList<Service> supportedServices;
 
-double pressure = 0;
-String action;
+	
+	public List<Platform> reproduce(BipartiteGraph state){
+		List<Platform> result = new ArrayList<Platform>();
+		for(PlatformReproductionStrategy reproducer : reproducers){
+			result.addAll(reproducer.reproduce(this, state));
+		}
+		return result;
+	}
+	
+	public void setLoadingFactor(int load){
+		this.APP_PER_SERVICE = load;
+	}
+	
+	public int getLoadingFactor(){
+		return this.APP_PER_SERVICE;
+	}
 
+	public List<Service> getSupportedServices(){
+		return this.services;
+	}	
 
-public double getPressure() {
-  return pressure;
-}
+	public void setSupportedServices(List<Service> other_services){
+		this.services = new ArrayList<Service>(other_services);
+	}
 
-public String getAction() {
-  return action;
-}
+	public void addSupportedServices(List<Service> other_services){
+		Set<Service> current_services = new HashSet<Service>(this.services);
+		for (Service srv: other_services){
+			current_services.add(srv);
+		}
+		this.services = new ArrayList<Service> (current_services);
+	}
+	
+	public Platform(int id, List<Service> servs) {
+	  super(id);
+	  this.services = new ArrayList<Service> (servs); 
+	}
 
+	public Platform(int id, List<Service> servs, int loading_factor) {
+	  super(id);
+	  this.services = new ArrayList<Service> (servs); 
+	  this.APP_PER_SERVICE = loading_factor;
+	}
 
-public Platform(int id, List<Service> servs) {
-  super(id);
-  for (Service s : servs) {
-    BipartiteGraph.addUnique(services, s);
-  }
-  action = "none";
-}
+	
+	/*
+	 * (non-Javadoc)
+	 * @see diversim.Entity#step(sim.engine.SimState)
+	 */
+	@Override
+	public void step(SimState state) {
+		
+	  
+	  BipartiteGraph graph = (BipartiteGraph)state;
+	  
+	  if(dieOrNot(graph))
+		  return;
+	  
+	  MersenneTwisterFast rnd = new MersenneTwisterFast(System.nanoTime());
+	  List<Platform> pltfs = reproduce(graph);
+	  for(Platform pltf : pltfs){
+		  graph.addPlatform(pltf);			  
+	  }
+	  
+	  
+	  System.out.println("Step " + state.schedule.getSteps() + " : " + toString());
+	}
+	
 
-
-/*
- * (non-Javadoc)
- * @see diversim.Entity#step(sim.engine.SimState)
- */
-@Override
-public void step(SimState state) {
-  BipartiteGraph graph = (BipartiteGraph)state;
-
-  action = "none";
-  if (degree > graph.platformMaxLoad)
-    if (getSize() >= 2 * graph.platformMinSize) {
-      split_Part(graph);
-      action = "split_part";
-    }
-    else if (getSize() > graph.platformMinSize) {
-      clone_Mutate(graph);
-      action = "clone_mutate";
-    }
-  pressure = ((double)degree) / graph.platformMaxLoad;
-  if (pressure > 1.0) pressure = 1.0;
-
-  System.out.println("Step " + state.schedule.getSteps() + " : " + toString());
-}
-
-
-/**
- * Split this platform in two and partition the services, so that
- * the most common services among the linked application are kept in this
- * instance and the other half of the services are removed and assigned
- * to the newly created platform.
- *
- * @param graph
- */
-private void split_Part(BipartiteGraph graph) {
-  Bag out = graph.bipartiteNetwork.getEdges(this, null); // read-only!
-  Edge[] edges = (Edge[])out.toArray(new Edge[0]);
-  // get the services used by the apps, sorted from the most to the least common
-  ArrayList<Service> sortedServices = sortServices(out);
-
-  // split the platform and keep here only the most shared half of the services
-  Platform p = graph.createPlatform(
-      sortedServices.subList(sortedServices.size() / 2, sortedServices.size()));
-  ArrayList<Entity> ents = new ArrayList<Entity>();
-  for (Edge e : edges) {
-    ents.add((Entity)e.getOtherNode(this));
-  }
-  graph.createLinks(p, ents);
-  System.out.println("Step " + graph.schedule.getSteps() + " : NEW " + p.toString());
-  for (int i = sortedServices.size() / 2; i < sortedServices.size(); i++) {
-    services.remove(sortedServices.get(i));
-  }
-  graph.updateLinks(this);
-}
-
-
-/**
- * Clone this instance and mutate both this instance and the clone, so that
- * one randomly chosen service in each instance (not the same in both) is removed.
- * Then update the network so that the apps link to the proper instance(s).
- *
- * @param graph
- */
-private void clone_Mutate(BipartiteGraph graph) {
-  int r1, r2;
-  Bag out = graph.bipartiteNetwork.getEdges(this, null); // read-only!
-  Edge[] edges = (Edge[])out.toArray(new Edge[0]);
-  ArrayList<Entity> ents = new ArrayList<Entity>();
-  for (Edge e : edges) {
-    ents.add((Entity)e.getOtherNode(this));
-  }
-
-  r1 = graph.random.nextInt(services.size());
-  do
-    r2 = graph.random.nextInt(services.size());
-  while (r1 == r2);
-
-  // generate a clone that has all the services of this platform but one.
-  ArrayList<Service> servs = new ArrayList<Service>(services);
-  servs.remove(r2);
-  Platform p = graph.createPlatform(servs);
-  graph.createLinks(p, ents);
-
-  // remove a service from this platform
-  services.remove(r1);
-  graph.updateLinks(p);
-}
-
-
-@Override
-public String toString() {
-  String res = super.toString();
-  res += " ; pressure = " + pressure
-      + " ; action = " + action;
-  return res;
-}
-
+	@Override
+	public String toString() {
+	  String res = super.toString();
+	  return res;
+	}
+	
+	public void initStategies(BipartiteGraph graph){
+		this.reproducers = StrategyFactory.fINSTANCE
+				.createPlatformReproductionStrategy(this, graph);
+		this.killers = StrategyFactory.fINSTANCE
+				.createPlatformExtinctionStrategies(this, graph);
+	}
+	
+	public boolean dieOrNot(BipartiteGraph graph){
+		if(dead)
+			return true;
+		for(PlatformExtinctionStrategy killer : killers){
+			if( killer.die(this, graph)){
+				this.dead = true;
+				return true;
+			}
+		}
+		return false;
+	}
+	
+	
 }
